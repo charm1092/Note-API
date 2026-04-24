@@ -17,7 +17,7 @@ type Repository struct {
 	mtx sync.RWMutex
 }
 
-func NewList() *Repository {
+func NewRepository() *Repository {
 	return &Repository{
 		notes: make(map[string]*Note),
 		versions: make(map[string][]NoteVersion),
@@ -86,10 +86,14 @@ func (r *Repository) RenameNote(title string, newTitle string) error {
 		return ErrNoteAlreadyExists
 	}
 
+	version := NewNoteVersion(*note, len(r.versions[title])+1)
+
+	r.versions[title] = append(r.versions[title], version)
 	note.Title = newTitle
 	r.notes[newTitle] = note
 	delete(r.notes, title)
-
+	r.versions[newTitle] = r.versions[title]
+	delete(r.versions, title)
 	return nil
 }
 
