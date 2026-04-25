@@ -110,7 +110,8 @@ func (r *Repository) ChangeContentNote(title string, newContent string) error {
 
 	r.versions[title] = append(r.versions[title], newNote)
 	note.Content = newContent
-	note.UpdatedAt = time.Now()
+	timeTmp := time.Now()
+	note.UpdatedAt = &timeTmp
 
 	return nil
 }
@@ -130,13 +131,13 @@ func (r *Repository) GetNoteHistory(title string) ([]NoteVersion, error) {
 	return tmp, nil
 }
 
-func (r *Repository) RestoreVersion(title string, version int) error {
+func (r *Repository) RestoreVersion(title string, version int) (string, error) {
 	r.mtx.Lock()
 	defer r.mtx.Unlock()
 
 	note, ok := r.notes[title]
 	if !ok {
-		return ErrNoteNotFound
+		return "", ErrNoteNotFound
 	}
 
 	versions := r.versions[title]
@@ -145,13 +146,26 @@ func (r *Repository) RestoreVersion(title string, version int) error {
 			currentVersion := NewNoteVersion(*note, len(versions)+1)
 			r.versions[title] = append(r.versions[title], currentVersion)
 
+			oldTitle := note.Title
+
+			note.Title = v.Title
 			note.Content = v.Content
 
-			note.UpdatedAt = time.Now()
-			return nil
+			timeTmp := time.Now()
+			note.UpdatedAt = &timeTmp
+
+			if oldTitle != v.Title {
+				delete(r.notes, oldTitle)
+				r.notes[v.Title] = note
+
+				r.versions[v.Title] = r.versions[oldTitle]
+				delete(r.versions, oldTitle)
+			}
+
+			return note.Title, nil
 		}
 	}
 
-	return ErrVersionNotFound
+	return "", ErrVersionNotFound
 	
 }
