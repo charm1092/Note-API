@@ -202,7 +202,7 @@ func (h *HTTPHandlers) HandleChangeNote(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if dto.NewContent != "" {
-		if err := h.repo.ChangeContentNote(title, dto.NewContent); err != nil {
+		if err := h.repo.ChangeContentNote(currentTitle, dto.NewContent); err != nil {
 			errDTO := ErrorDTO{
 				Message: err.Error(),
 				Time:    time.Now(),
@@ -281,8 +281,9 @@ func (h *HTTPHandlers) HandleRestoreVersion(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if err := h.repo.RestoreVersion(title, version); err != nil {
-		errDTO := ErrorDTO{
+	restoredTitle, err := h.repo.RestoreVersion(title, version);
+	if err != nil {
+		errDTO := ErrorDTO {
 			Message: err.Error(),
 			Time:    time.Now(),
 		}
@@ -296,7 +297,7 @@ func (h *HTTPHandlers) HandleRestoreVersion(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	updatedNote, err := h.repo.GetNote(title)
+	updatedNote, err := h.repo.GetNote(restoredTitle)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

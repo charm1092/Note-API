@@ -7,7 +7,7 @@ type Note struct {
 	Title string
 	Content string
 	CreatedAt time.Time
-	UpdatedAt time.Time
+	UpdatedAt *time.Time
 }
 
 func NewNote(title string, content string) Note {
@@ -17,5 +17,6 @@ func NewNote(title string, content string) Note {
 		Content: content,
 
 		CreatedAt: time.Now(),
+		UpdatedAt: nil,
 	}
 }
