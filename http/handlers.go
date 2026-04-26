@@ -26,6 +26,7 @@ func NewHTTPHandlers(repo *note.Repository) *HTTPHandlers {
 // POST
 // info: JSON in HTTP request body
 func (h *HTTPHandlers) HandleCreateNote(w http.ResponseWriter, r *http.Request)  {
+	ctx := r.Context()
 	var noteDTO NoteDTO
 	if err := json.NewDecoder(r.Body).Decode(&noteDTO); err != nil {
 		errDTO := ErrorDTO{
@@ -48,7 +49,7 @@ func (h *HTTPHandlers) HandleCreateNote(w http.ResponseWriter, r *http.Request) 
 	}
 
 	noteVar := note.NewNote(noteDTO.Title, noteDTO.Content)
-	if err := h.repo.AddNote(noteVar); err != nil {
+	if err := h.repo.AddNote(ctx, noteVar); err != nil {
 		errDTO := ErrorDTO{
 			Message: err.Error(),
 			Time:    time.Now(),
@@ -81,9 +82,10 @@ func (h *HTTPHandlers) HandleCreateNote(w http.ResponseWriter, r *http.Request) 
 // DELETE
 // info: pattern
 func (h *HTTPHandlers) HandleDeleteNote(w http.ResponseWriter, r *http.Request)  {
+	ctx := r.Context()
 	title := mux.Vars(r)["title"]
 
-	if err := h.repo.DeleteNote(title); err != nil {
+	if err := h.repo.DeleteNote(ctx, title); err != nil {
 		errDTO := ErrorDTO{
 			Message: err.Error(),
 			Time:    time.Now(),
@@ -106,9 +108,10 @@ func (h *HTTPHandlers) HandleDeleteNote(w http.ResponseWriter, r *http.Request) 
 // GET
 // info: pattern
 func (h *HTTPHandlers) HandleGetNote(w http.ResponseWriter, r *http.Request)  {
+	ctx := r.Context()
 	title := mux.Vars(r)["title"]
 
-	noteVar, err := h.repo.GetNote(title)
+	noteVar, err := h.repo.GetNote(ctx, title)
 	if err != nil {
 		errDTO := ErrorDTO{
 			Message: err.Error(),
@@ -140,7 +143,22 @@ func (h *HTTPHandlers) HandleGetNote(w http.ResponseWriter, r *http.Request)  {
 // GET
 // info: -
 func (h *HTTPHandlers) HandleGetAllNotes(w http.ResponseWriter, r *http.Request)  {
-	notes := h.repo.ListNotes()
+	ctx := r.Context()
+	notes, err := h.repo.ListNotes(ctx)
+	if err != nil {
+		errDTO := ErrorDTO{
+			Message: err.Error(),
+			Time:    time.Now(),
+		}
+
+		if errors.Is(err, note.ErrNoteNotFound) {
+			http.Error(w, errDTO.ToString(), http.StatusNotFound)
+		} else {
+			http.Error(w, errDTO.ToString(), http.StatusInternalServerError)
+		}
+
+		return
+	}
 	b, err := json.MarshalIndent(notes, "", "    ")
 	if err != nil {
 		panic(err)
@@ -157,6 +175,7 @@ func (h *HTTPHandlers) HandleGetAllNotes(w http.ResponseWriter, r *http.Request)
 // PATCH
 // info: pattern + JSON in request body
 func (h *HTTPHandlers) HandleChangeNote(w http.ResponseWriter, r *http.Request)  {
+	ctx := r.Context()
 	title := mux.Vars(r)["title"]
 	currentTitle := title
 
@@ -182,7 +201,7 @@ func (h *HTTPHandlers) HandleChangeNote(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if dto.NewTitle != "" {
-		if err := h.repo.RenameNote(title, dto.NewTitle); err != nil {
+		if err := h.repo.RenameNote(ctx, title, dto.NewTitle); err != nil {
 			errDTO := ErrorDTO{
 				Message: err.Error(),
 				Time:    time.Now(),
@@ -202,7 +221,7 @@ func (h *HTTPHandlers) HandleChangeNote(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if dto.NewContent != "" {
-		if err := h.repo.ChangeContentNote(currentTitle, dto.NewContent); err != nil {
+		if err := h.repo.ChangeContentNote(ctx, currentTitle, dto.NewContent); err != nil {
 			errDTO := ErrorDTO{
 				Message: err.Error(),
 				Time:    time.Now(),
@@ -217,7 +236,7 @@ func (h *HTTPHandlers) HandleChangeNote(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	updatedNote, err := h.repo.GetNote(currentTitle)
+	updatedNote, err := h.repo.GetNote(ctx, currentTitle)
 	if err != nil {
 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -239,9 +258,10 @@ func (h *HTTPHandlers) HandleChangeNote(w http.ResponseWriter, r *http.Request) 
 // GET
 // info: pattern
 func (h *HTTPHandlers) HandleGetHistoryVersionsOfNote(w http.ResponseWriter, r *http.Request)  {
+	ctx := r.Context()
 	title := mux.Vars(r)["title"]
 
-	history, err := h.repo.GetNoteHistory(title)
+	history, err := h.repo.GetNoteHistory(ctx, title)
 	if err != nil {
 		errDTO := ErrorDTO{
 			Message: err.Error(),
@@ -272,6 +292,7 @@ func (h *HTTPHandlers) HandleGetHistoryVersionsOfNote(w http.ResponseWriter, r *
 // POST
 // info: pattern
 func (h *HTTPHandlers) HandleRestoreVersion(w http.ResponseWriter, r *http.Request)  {
+	ctx := r.Context()
 	title := mux.Vars(r)["title"]
 	versionStr := mux.Vars(r)["version"]
 
@@ -281,7 +302,7 @@ func (h *HTTPHandlers) HandleRestoreVersion(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	restoredTitle, err := h.repo.RestoreVersion(title, version);
+	restoredTitle, err := h.repo.RestoreVersion(ctx, title, version);
 	if err != nil {
 		errDTO := ErrorDTO {
 			Message: err.Error(),
@@ -297,7 +318,7 @@ func (h *HTTPHandlers) HandleRestoreVersion(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	updatedNote, err := h.repo.GetNote(restoredTitle)
+	updatedNote, err := h.repo.GetNote(ctx, restoredTitle)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

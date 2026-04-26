@@ -1,171 +1,346 @@
 package note
 
 import (
-	"sync"
+	"context"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// * создать заметку
-// * получить заметку
-// * изменить заметку
-// * посмотреть историю
-// * восстановить старую версию
-// * удалить заметку
 type Repository struct {
-	notes map[string]*Note
-	versions map[string][]NoteVersion
-	mtx sync.RWMutex
+	pool *pgxpool.Pool
 }
 
-func NewRepository() *Repository {
+func NewRepository(conn *pgxpool.Pool) *Repository {
 	return &Repository{
-		notes: make(map[string]*Note),
-		versions: make(map[string][]NoteVersion),
+		pool: conn,
 	}
 }
 
-func (r *Repository) AddNote(note Note) error {
-	r.mtx.Lock()
-	defer r.mtx.Unlock()
+func (r *Repository) AddNote(ctx context.Context, note Note) error {
 
-	if _, ok := r.notes[note.Title]; ok {
-		return ErrNoteAlreadyExists
+	sqlQuery := `
+	INSERT INTO notes(version, title, content, created_at)
+	VALUES($1, $2, $3, $4)
+	ON CONFLICT (title) DO NOTHING
+	`
+
+	_, err := r.pool.Exec(ctx, sqlQuery, note.Version, note.Title, note.Content, note.CreatedAt)
+	return err
+}
+
+func (r *Repository) GetNote(ctx context.Context, title string) (Note, error) {
+	sqlQuery := `
+	SELECT version, title, content, created_at, updated_at
+	FROM notes
+	WHERE title = $1
+	`
+
+	var note Note
+
+	err := r.pool.QueryRow(ctx, sqlQuery, title).Scan(
+		&note.Version,
+		&note.Title,
+		&note.Content,
+		&note.CreatedAt,
+		&note.UpdatedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return Note{}, ErrNoteNotFound
+		}
+		return Note{}, err
+	}
+	return note, nil
+}
+
+func (r *Repository) ListNotes(ctx context.Context) (map[string]*Note, error) {
+	sqlQuery := `
+	SELECT version, title, content, created_at, updated_at
+	FROM notes
+	ORDER BY created_at DESC 
+	`
+	rows, err := r.pool.Query(ctx, sqlQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	notes := make(map[string]*Note, 0)
+
+	for rows.Next() {
+		var note Note
+
+		err := rows.Scan(
+			&note.Version,
+			&note.Title,
+			&note.Content,
+			&note.CreatedAt,
+			&note.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		n := note
+		notes[n.Title] = &n
 	}
 
-	r.notes[note.Title] = &note
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return notes, nil
+}
+
+func (r *Repository) DeleteNote(ctx context.Context, title string) error {
+	sqlQuery := `
+	DELETE FROM notes
+	WHERE title = $1
+	`
+	_, err := r.pool.Exec(ctx,
+		sqlQuery,
+		title,
+	)
+
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return ErrNoteNotFound
+		}
+		return err
+	}
 	return nil
 }
 
-func (r *Repository) GetNote(title string) (Note, error) {
-	r.mtx.RLock()
-	defer r.mtx.RUnlock()
+func (r *Repository) RenameNote(ctx context.Context, title string, newTitle string) error {
+	sqlQueryForVersionTable := `
+	INSERT INTO note_versions(version, title, content, changed_at)
+	VALUES($1, $2, $3, $4)
+	`
 
-	note, ok := r.notes[title]
-	if !ok {
-		return Note{}, ErrNoteNotFound
+	sqlQueryForUpdateNotes := `
+	UPDATE notes SET
+	version = version+1,
+	title = $1,
+	updated_at = $2
+	WHERE title = $3 
+	`
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	currentNote, err := r.GetNote(ctx, title)
+	if err != nil {
+		return err
 	}
 
-	return *note, nil
-}
+	version := NewNoteVersion(currentNote, currentNote.Version+1)
+	currentTime := time.Now()
 
-func (r *Repository) ListNotes() map[string]*Note {
-	r.mtx.RLock()
-	defer r.mtx.RUnlock()
-
-	tmp := make(map[string]*Note, len(r.notes))
-
-	for k, v := range r.notes {
-		tmp[k] = v
+	_, err = tx.Exec(ctx,
+		sqlQueryForVersionTable,
+		version.Version,
+		version.Title,
+		version.Content,
+		version.ChangedAt,
+	)
+	if err != nil {
+		return err
 	}
-	return tmp
-}
 
-func (r *Repository) DeleteNote(title string) error {
-	r.mtx.Lock()
-	defer r.mtx.Unlock()
 
-	if _, ok := r.notes[title]; !ok {
+	commandTag, err := tx.Exec(ctx,
+		 sqlQueryForUpdateNotes,
+		 newTitle, currentTime, title,
+		)
+	if err != nil {
+		return err
+	}
+
+	if commandTag.RowsAffected() == 0 {
 		return ErrNoteNotFound
 	}
 
-	delete(r.notes, title)
-
-	return nil
+	return tx.Commit(ctx)
+	
 }
 
-func (r *Repository) RenameNote(title string, newTitle string) error {
-	r.mtx.Lock()
-	defer r.mtx.Unlock()
+func (r *Repository) ChangeContentNote(ctx context.Context, title string, newContent string) error {
+	sqlQueryForVersionTable := `
+	INSERT INTO note_versions(version, title, content, changed_at)
+	VALUES($1, $2, $3, $4)
+	`
 
-	note, ok := r.notes[title]
-	if !ok {
+	sqlQueryForUpdateNotes := `
+	UPDATE notes SET
+	version = version+1,
+	content = $1,
+	updated_at = $2
+	WHERE title = $3 
+	`
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	currentNote, err := r.GetNote(ctx, title)
+	if err != nil {
 		return ErrNoteNotFound
 	}
 
-	if _, ok := r.notes[newTitle]; ok {
-		return ErrNoteAlreadyExists
+	version := NewNoteVersion(currentNote, currentNote.Version+1)
+	_, err = tx.Exec(ctx, 
+		sqlQueryForVersionTable,
+		version.Version,
+		version.Title,
+		version.Content,
+		version.ChangedAt,
+	)
+
+	if err != nil {
+		return err
 	}
 
-	version := NewNoteVersion(*note, len(r.versions[title])+1)
+	currentTime := time.Now()
 
-	r.versions[title] = append(r.versions[title], version)
-	note.Title = newTitle
-	r.notes[newTitle] = note
-	delete(r.notes, title)
-	r.versions[newTitle] = r.versions[title]
-	delete(r.versions, title)
-	return nil
-}
+	commandTag, err := tx.Exec(ctx,
+		 sqlQueryForUpdateNotes,
+		 newContent, currentTime, title,
+		)
+	if err != nil {
+		return err
+	}
 
-func (r *Repository) ChangeContentNote(title string, newContent string) error {
-	r.mtx.Lock()
-	defer r.mtx.Unlock()
-
-	if _, ok := r.notes[title]; !ok {
+	if commandTag.RowsAffected() == 0 {
 		return ErrNoteNotFound
 	}
 
-	note := r.notes[title]
-	newNote := NewNoteVersion(*note, len(r.versions[title])+1)
-
-	r.versions[title] = append(r.versions[title], newNote)
-	note.Content = newContent
-	timeTmp := time.Now()
-	note.UpdatedAt = &timeTmp
-
-	return nil
+	return tx.Commit(ctx)
 }
 
-func (r *Repository) GetNoteHistory(title string) ([]NoteVersion, error) {
-	r.mtx.RLock()
-	defer r.mtx.RUnlock()
+func (r *Repository) GetNoteHistory(ctx context.Context, title string) ([]NoteVersion, error) {
+	sqlQuery := `
+	SELECT version, title, content, changed_at
+	FROM note_versions
+	WHERE title = $1
+	ORDER BY changed_at DESC
+	`
+	rows, err := r.pool.Query(ctx, sqlQuery, title)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 
-	if _, ok := r.notes[title]; !ok {
-		return nil, ErrNoteNotFound
+	noteVersions := make([]NoteVersion, 0)
+
+	for rows.Next() {
+		var version NoteVersion
+
+		err := rows.Scan(
+			&version.Version,
+			&version.Title,
+			&version.Content,
+			&version.ChangedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		noteVersions = append(noteVersions, version)
 	}
 
-	versions := r.versions[title]
-	tmp := make([]NoteVersion, len(versions))
-	copy(tmp, versions)
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
-	return tmp, nil
+	return noteVersions, nil
+
 }
 
-func (r *Repository) RestoreVersion(title string, version int) (string, error) {
-	r.mtx.Lock()
-	defer r.mtx.Unlock()
+func (r *Repository) RestoreVersion(ctx context.Context, title string, version int) (string, error) {
+	// берем нужную нам версию заметки для восстановления
+	sqlQuery1 := `
+	SELECT version, title, content, changed_at
+	FROM note_versions
+	WHERE title = $1 AND version = $2
+	`
 
-	note, ok := r.notes[title]
-	if !ok {
+	// запрос для вставки в список версий текущей заметки
+	sqlQuery2 := `
+	INSERT INTO note_versions(version, title, content, changed_at)
+	VALUES($1, $2, $3, $4)
+	`
+
+	// перезапись текущей заметки на ту кот получили в 1 запросе
+	sqlQuery3 := `
+	UPDATE notes
+	SET title = $1,
+		content = $2,
+		version = version+1
+		updated_at = $3
+	WHERE title = $4
+	`
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+
+	currentNote, err := r.GetNote(ctx, title)
+	if err != nil {
+		return "", err
+	}
+
+	var oldVersion NoteVersion
+	currentVersion := NewNoteVersion(currentNote, currentNote.Version+1)
+	currentTime := time.Now()
+
+	err = tx.QueryRow(ctx, sqlQuery1, title, version).Scan(
+		&oldVersion.Title,
+		&oldVersion.Version,
+	)
+
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return "", ErrVersionNotFound
+		}
+		return "", err
+	}
+
+	_, err = tx.Exec(ctx, sqlQuery2,
+		currentVersion.Version,
+		currentVersion.Title,
+		currentVersion.Content,
+		currentVersion.ChangedAt,
+	)
+	if err != nil {
+		return "", err
+	}
+
+	commandTag, err := tx.Exec(ctx, sqlQuery3,
+		oldVersion.Title,
+		oldVersion.Content,
+		currentTime,
+		title,
+	)
+	if err != nil {
+		return "", err
+	}
+
+	if commandTag.RowsAffected() == 0 {
 		return "", ErrNoteNotFound
 	}
 
-	versions := r.versions[title]
-	for _, v := range versions {
-		if v.Version == version {
-			currentVersion := NewNoteVersion(*note, len(versions)+1)
-			r.versions[title] = append(r.versions[title], currentVersion)
-
-			oldTitle := note.Title
-
-			note.Title = v.Title
-			note.Content = v.Content
-
-			timeTmp := time.Now()
-			note.UpdatedAt = &timeTmp
-
-			if oldTitle != v.Title {
-				delete(r.notes, oldTitle)
-				r.notes[v.Title] = note
-
-				r.versions[v.Title] = r.versions[oldTitle]
-				delete(r.versions, oldTitle)
-			}
-
-			return note.Title, nil
-		}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
 	}
 
-	return "", ErrVersionNotFound
-	
+	return oldVersion.Title, nil
 }
