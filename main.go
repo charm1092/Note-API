@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"log"
 	"note_api/db/connection"
-	"note_api/db/tables"
+	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/database/postgres"
+	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/jackc/pgx/v5/stdlib"
 	"note_api/http"
 	"note_api/note"
 )
@@ -24,10 +27,28 @@ func main()  {
 		log.Fatal(err)
 	}
 
-	err = tables.CreateTables(ctx, pool)
+	sqlDB := stdlib.OpenDBFromPool(pool)
+	defer sqlDB.Close()
+
+		driver, err := postgres.WithInstance(sqlDB, &postgres.Config{})
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	m, err := migrate.NewWithDatabaseInstance(
+		"file://migrations",
+		"postgres",
+		driver,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+		log.Fatal(err)
+	}
+
+	
 
 	repo := note.NewRepository(pool)
 	httpHandler := http.NewHTTPHandlers(repo)
